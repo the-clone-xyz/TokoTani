@@ -6,12 +6,16 @@ import HomePage from './pages/HomePage';
 import ProductDetailPage from './pages/ProductDetailPage';
 import CartPage from './pages/CartPage';
 import CheckoutPage from './pages/CheckoutPage';
+import OrderHistoryPage from './pages/OrderHistoryPage';
 import AdminLogin from './pages/admin/AdminLogin';
+import AdminDashboard from './pages/admin/AdminDashboard';
 import AdminProducts from './pages/admin/AdminProducts';
 import AdminSales from './pages/admin/AdminSales';
 import { CartProvider } from './context/CartContext';
 import { ProductProvider } from './context/ProductContext';
 import { AuthProvider } from './context/AuthContext';
+
+import AdminMidtrans from './pages/admin/AdminMidtrans';
 
 export default function App() {
   return (
@@ -52,14 +56,17 @@ export default function App() {
                 <Route path="product/:id" element={<ProductDetailPage />} />
                 <Route path="cart" element={<CartPage />} />
                 <Route path="checkout" element={<CheckoutPage />} />
+                <Route path="my-orders" element={<OrderHistoryPage />} />
               </Route>
 
               {/* Admin Routes */}
               <Route path="/admin/login" element={<AdminLogin />} />
               <Route path="/admin" element={<AdminLayout />}>
-                <Route index element={<Navigate to="/admin/products" replace />} />
+                <Route index element={<Navigate to="/admin/dashboard" replace />} />
+                <Route path="dashboard" element={<AdminDashboard />} />
                 <Route path="products" element={<AdminProducts />} />
                 <Route path="sales" element={<AdminSales />} />
+                <Route path="midtrans" element={<AdminMidtrans />} />
               </Route>
             </Routes>
             

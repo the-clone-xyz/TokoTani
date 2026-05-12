@@ -1,11 +1,19 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useCart } from '../context/CartContext';
 import { formatIDR } from './HomePage';
-import { MessageCircle, MapPin, User, ChevronLeft } from 'lucide-react';
+import { MessageCircle, MapPin, User, ChevronLeft, CreditCard } from 'lucide-react';
+import Swal from 'sweetalert2';
+
+// Extend window for Snap
+declare global {
+  interface Window {
+    snap: any;
+  }
+}
 
 export default function CheckoutPage() {
-  const { cart, cartTotal } = useCart();
+  const { cart, cartTotal, clearCart } = useCart();
   const navigate = useNavigate();
   
   const [formData, setFormData] = useState({
@@ -14,6 +22,31 @@ export default function CheckoutPage() {
     address: '',
     notes: ''
   });
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [clientKeyConfig, setClientKeyConfig] = useState<any>(null);
+
+  useEffect(() => {
+    // Fetch Midtrans client key
+    const fetchKey = async () => {
+      try {
+        const res = await fetch('/api/midtrans/client-key');
+        const data = await res.json();
+        setClientKeyConfig(data);
+
+        if (data && data.client_key) {
+          const script = document.createElement("script");
+          script.src = data.is_production 
+            ? "https://app.midtrans.com/snap/snap.js"
+            : "https://app.sandbox.midtrans.com/snap/snap.js";
+          script.setAttribute("data-client-key", data.client_key);
+          document.head.appendChild(script);
+        }
+      } catch (err) {
+        console.error("Failed to load Midtrans config", err);
+      }
+    };
+    fetchKey();
+  }, []);
 
   if (cart.length === 0) {
     navigate('/cart');
@@ -24,33 +57,107 @@ export default function CheckoutPage() {
     setFormData({ ...formData, [e.target.name]: e.target.value });
   };
 
-  const handleWhatsAppCheckout = (e: React.FormEvent) => {
+  const handleCheckout = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    // Format cart items
-    const itemsList = cart.map(item => 
-      `- ${item.name} (${item.quantity}x) = ${formatIDR(item.price * item.quantity)}`
-    ).join('\n');
+    if (!clientKeyConfig?.client_key) {
+      Swal.fire('Error', 'Payment Gateway belum di tentukan. Harap hubungi admin.', 'error');
+      return;
+    }
 
-    const message = `*Halo TokoTani*, saya ingin memesan produk berikut:
+    setIsProcessing(true);
 
-*Daftar Pesanan:*
-${itemsList}
+    try {
+      const payload = {
+        customer_name: formData.name,
+        customer_phone: formData.phone,
+        customer_email: 'user@example.com', // mock email
+        address: formData.address,
+        total_amount: cartTotal,
+        items: cart
+      };
 
-*Total Belanja:* ${formatIDR(cartTotal)}
+      const res = await fetch('/api/checkout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
 
-*Data Pengiriman:*
-Nama: ${formData.name}
-No HP: ${formData.phone}
-Alamat: ${formData.address}
-${formData.notes ? `Catatan: ${formData.notes}` : ''}
+      const data = await res.json();
 
-Mohon info untuk pembayaran dan pengiriman. Terima kasih.`;
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to create transaction');
+      }
 
-    const encodedMessage = encodeURIComponent(message);
-    const waNumber = '6281234567890'; // Number without '+'
-    
-    window.open(`https://wa.me/${waNumber}?text=${encodedMessage}`, '_blank');
+      window.snap.pay(data.token, {
+        onSuccess: async function(result: any){
+          try {
+            await fetch('/api/orders/update-status', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ order_id: result.order_id, transaction_status: result.transaction_status || 'settlement' })
+            });
+            // Save to localStorage
+            const savedOrdersStr = localStorage.getItem('user_orders');
+            let orderIds: string[] = [];
+            if (savedOrdersStr) {
+               try { orderIds = JSON.parse(savedOrdersStr); } catch (e) {}
+            }
+            if (!orderIds.includes(result.order_id)) {
+              orderIds.push(result.order_id);
+              localStorage.setItem('user_orders', JSON.stringify(orderIds));
+            }
+          } catch(e) {}
+          
+          Swal.fire('Berhasil!', 'Pembayaran Anda berhasil.', 'success').then(() => {
+            clearCart();
+            navigate('/my-orders');
+          });
+        },
+        onPending: async function(result: any){
+          try {
+            await fetch('/api/orders/update-status', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ order_id: result.order_id, transaction_status: result.transaction_status || 'pending' })
+            });
+
+            const savedOrdersStr = localStorage.getItem('user_orders');
+            let orderIds: string[] = [];
+            if (savedOrdersStr) {
+               try { orderIds = JSON.parse(savedOrdersStr); } catch (e) {}
+            }
+            if (!orderIds.includes(result.order_id)) {
+              orderIds.push(result.order_id);
+              localStorage.setItem('user_orders', JSON.stringify(orderIds));
+            }
+          } catch(e) {}
+
+          Swal.fire('Menunggu Pembayaran', 'Silahkan selesaikan pembayaran Anda.', 'info').then(() => {
+            clearCart();
+            navigate('/my-orders');
+          });
+        },
+        onError: async function(result: any){
+          try {
+            await fetch('/api/orders/update-status', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ order_id: result.order_id, transaction_status: result.transaction_status || 'cancel' })
+            });
+          } catch(e) {}
+
+          Swal.fire('Gagal', 'Pembayaran gagal. Silahkan coba lagi.', 'error');
+          setIsProcessing(false);
+        },
+        onClose: function(){
+          setIsProcessing(false);
+        }
+      });
+    } catch (err: any) {
+      console.error(err);
+      Swal.fire('Error', err.message, 'error');
+      setIsProcessing(false);
+    }
   };
 
   return (
@@ -73,7 +180,7 @@ Mohon info untuk pembayaran dan pengiriman. Terima kasih.`;
               Detail Pengiriman
             </h2>
             
-            <form onSubmit={handleWhatsAppCheckout} className="space-y-4" id="checkout-form">
+            <form onSubmit={handleCheckout} className="space-y-4" id="checkout-form">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Nama Lengkap</label>
                 <input 
@@ -153,16 +260,16 @@ Mohon info untuk pembayaran dan pengiriman. Terima kasih.`;
                 <span className="text-gray-600">Total Harga</span>
                 <span className="font-bold text-gray-900">{formatIDR(cartTotal)}</span>
               </div>
-              <p className="text-xs text-gray-500 mt-2">*Belum termasuk ongkos kirim. Ongkir akan diinfokan via WhatsApp.</p>
             </div>
 
             <button 
               type="submit"
               form="checkout-form"
-              className="w-full bg-[#25D366] hover:bg-[#1DA851] text-white py-3 rounded-xl font-bold flex items-center justify-center space-x-2 transition-colors shadow-sm"
+              disabled={isProcessing}
+              className="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-3 rounded-xl font-bold flex items-center justify-center space-x-2 transition-colors shadow-sm disabled:opacity-50"
             >
-              <MessageCircle className="w-5 h-5" />
-              <span>Pesan via WhatsApp</span>
+              <CreditCard className="w-5 h-5" />
+              <span>{isProcessing ? 'Memproses...' : 'Bayar Sekarang'}</span>
             </button>
           </div>
         </div>

@@ -6,6 +6,7 @@ import jwt from "jsonwebtoken";
 import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
+import midtransClient from 'midtrans-client';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -31,6 +32,35 @@ db.exec(`
     image TEXT,
     category TEXT,
     stock INTEGER
+  );
+
+  CREATE TABLE IF NOT EXISTS orders (
+    id TEXT PRIMARY KEY,
+    customer_name TEXT,
+    customer_email TEXT,
+    customer_phone TEXT,
+    address TEXT,
+    total_amount INTEGER,
+    status TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS order_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id TEXT,
+    product_id INTEGER,
+    product_name TEXT,
+    quantity INTEGER,
+    price INTEGER,
+    FOREIGN KEY(order_id) REFERENCES orders(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS midtrans_config (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    merchant_id TEXT,
+    client_key TEXT,
+    server_key TEXT,
+    is_production BOOLEAN DEFAULT 0
   );
 `);
 
@@ -162,6 +192,202 @@ async function startServer() {
     try {
       db.prepare("DELETE FROM products WHERE id = ?").run(req.params.id);
       res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Midtrans Config Routes
+  app.get("/api/admin/midtrans", authenticateToken, (req, res) => {
+    try {
+      let config = db.prepare("SELECT * FROM midtrans_config LIMIT 1").get();
+      if (!config) {
+        config = { merchant_id: '', client_key: '', server_key: '', is_production: 0 };
+      }
+      res.json(config);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/admin/midtrans", authenticateToken, (req, res) => {
+    const { merchant_id, client_key, server_key, is_production } = req.body;
+    try {
+      const existing = db.prepare("SELECT id FROM midtrans_config LIMIT 1").get() as any;
+      if (existing) {
+        db.prepare("UPDATE midtrans_config SET merchant_id = ?, client_key = ?, server_key = ?, is_production = ? WHERE id = ?")
+          .run(merchant_id, client_key, server_key, is_production ? 1 : 0, existing.id);
+      } else {
+        db.prepare("INSERT INTO midtrans_config (merchant_id, client_key, server_key, is_production) VALUES (?, ?, ?, ?)")
+          .run(merchant_id, client_key, server_key, is_production ? 1 : 0);
+      }
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Order & Checkout Routes
+  app.post("/api/checkout", async (req, res) => {
+    const { customer_name, customer_email, customer_phone, address, items, total_amount } = req.body;
+    const order_id = "ORDER-" + Date.now();
+
+    try {
+      // Save order
+      db.prepare("INSERT INTO orders (id, customer_name, customer_email, customer_phone, address, total_amount, status) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run(order_id, customer_name, customer_email, customer_phone, address, total_amount, 'pending');
+
+      // Save order items
+      if (items && Array.isArray(items)) {
+        const insertItem = db.prepare("INSERT INTO order_items (order_id, product_id, product_name, quantity, price) VALUES (?, ?, ?, ?, ?)");
+        items.forEach((item: any) => {
+          insertItem.run(order_id, item.id || item.product_id, item.name, item.quantity, item.price);
+        });
+      }
+
+      // Get Midtrans config
+      const config = db.prepare("SELECT * FROM midtrans_config LIMIT 1").get() as any;
+      if (!config || !config.server_key) {
+        return res.status(400).json({ error: "Midtrans is not configured" });
+      }
+
+      // Create SNAP transaction
+      let snap = new midtransClient.Snap({
+        isProduction: config.is_production === 1,
+        serverKey: config.server_key,
+        clientKey: config.client_key
+      });
+
+      let parameter: any = {
+        "transaction_details": {
+          "order_id": order_id,
+          "gross_amount": total_amount
+        },
+        "customer_details": {
+          "first_name": customer_name,
+          "email": customer_email,
+          "phone": customer_phone,
+          "shipping_address": {
+            "first_name": customer_name,
+            "phone": customer_phone,
+            "address": address
+          }
+        }
+      };
+
+      if (items && Array.isArray(items)) {
+        parameter.item_details = items.map((item: any) => ({
+          id: item.id || item.product_id,
+          price: item.price,
+          quantity: item.quantity,
+          name: item.name.substring(0, 50) // Midtrans has length limit
+        }));
+      }
+
+      const transaction = await snap.createTransaction(parameter);
+      res.json({ token: transaction.token, redirect_url: transaction.redirect_url, order_id });
+    } catch (e: any) {
+      console.error("Checkout error:", e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/midtrans/client-key", (req, res) => {
+    try {
+      const config = db.prepare("SELECT client_key, is_production FROM midtrans_config LIMIT 1").get() as any;
+      if (config) {
+        res.json({ client_key: config.client_key, is_production: config.is_production === 1 });
+      } else {
+        res.json({ client_key: null });
+      }
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/orders/update-status", (req, res) => {
+    const { order_id, transaction_status } = req.body;
+    try {
+      let status = 'pending';
+      if (transaction_status === 'capture' || transaction_status === 'settlement') {
+          status = 'success';
+      } else if (transaction_status === 'cancel' || transaction_status === 'deny' || transaction_status === 'expire') {
+          status = 'failed';
+      } else if (transaction_status === 'pending') {
+          status = 'pending';
+      }
+      db.prepare("UPDATE orders SET status = ? WHERE id = ?").run(status, order_id);
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Midtrans Notification URL (Webhook)
+  app.post("/api/webhook/midtrans", (req, res) => {
+    try {
+      const config = db.prepare("SELECT * FROM midtrans_config LIMIT 1").get() as any;
+      if (!config) {
+        return res.status(400).json({ error: "Midtrans is not configured" });
+      }
+
+      const apiClient = new midtransClient.Snap({
+        isProduction: config.is_production === 1,
+        serverKey: config.server_key,
+        clientKey: config.client_key
+      });
+
+      apiClient.transaction.notification(req.body)
+        .then((statusResponse: any) => {
+          let orderId = statusResponse.order_id;
+          let transactionStatus = statusResponse.transaction_status;
+          let fraudStatus = statusResponse.fraud_status;
+
+          console.log(`Transaction notification received. Order ID: ${orderId}. Transaction status: ${transactionStatus}. Fraud status: ${fraudStatus}`);
+
+          let status = 'pending';
+          if (transactionStatus == 'capture') {
+              if (fraudStatus == 'challenge') {
+                  status = 'pending';
+              } else if (fraudStatus == 'accept') {
+                  status = 'success';
+              }
+          } else if (transactionStatus == 'settlement') {
+              status = 'success';
+          } else if (transactionStatus == 'cancel' || transactionStatus == 'deny' || transactionStatus == 'expire') {
+              status = 'failed';
+          } else if (transactionStatus == 'pending') {
+              status = 'pending';
+          }
+          
+          db.prepare("UPDATE orders SET status = ? WHERE id = ?").run(status, orderId);
+          res.status(200).json({ status: "ok" });
+        });
+    } catch (e: any) {
+      console.error("Webhook error:", e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Customer get order
+  app.get("/api/orders/:id", (req, res) => {
+    try {
+      const order = db.prepare("SELECT * FROM orders WHERE id = ?").get(req.params.id) as any;
+      if (!order) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+      const items = db.prepare("SELECT * FROM order_items WHERE order_id = ?").all(order.id);
+      res.json({ ...order, items });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Admin orders
+  app.get("/api/admin/orders", authenticateToken, (req, res) => {
+    try {
+      const orders = db.prepare("SELECT * FROM orders ORDER BY created_at DESC").all();
+      res.json(orders);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }

@@ -34,6 +34,12 @@ export default function Navbar() {
             </Link>
           
             <div className="flex items-center space-x-2 sm:space-x-4">
+              <Link 
+                to="/my-orders"
+                className="text-sm font-medium text-emerald-900 hover:text-emerald-600 transition-colors hidden sm:block mr-2"
+              >
+                Riwayat Pesanan
+              </Link>
               <button 
                 onClick={() => navigate('/cart')}
                 className="relative p-2 hover:bg-emerald-50 text-emerald-900 rounded-full transition-colors flex items-center"

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { Leaf, Package, ShoppingBag, LogOut, Menu, X } from 'lucide-react';
+import { Leaf, Package, ShoppingBag, LogOut, Menu, X, LayoutDashboard, CreditCard } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 
 export default function AdminSidebar() {
@@ -11,8 +11,10 @@ export default function AdminSidebar() {
   const toggleSidebar = () => setIsOpen(!isOpen);
 
   const navItems = [
+    { name: 'Dashboard', path: '/admin/dashboard', icon: LayoutDashboard },
     { name: 'Data Barang', path: '/admin/products', icon: Package },
     { name: 'Penjualan', path: '/admin/sales', icon: ShoppingBag },
+    { name: 'Midtrans', path: '/admin/midtrans', icon: CreditCard },
   ];
 
   return (
