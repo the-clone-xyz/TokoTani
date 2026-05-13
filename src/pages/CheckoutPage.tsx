@@ -48,8 +48,13 @@ export default function CheckoutPage() {
     fetchKey();
   }, []);
 
+  useEffect(() => {
+    if (cart.length === 0) {
+      navigate('/cart');
+    }
+  }, [cart, navigate]);
+
   if (cart.length === 0) {
-    navigate('/cart');
     return null;
   }
 
@@ -59,11 +64,6 @@ export default function CheckoutPage() {
 
   const handleCheckout = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!clientKeyConfig?.client_key) {
-      Swal.fire('Error', 'Payment Gateway belum di tentukan. Harap hubungi admin.', 'error');
-      return;
-    }
-
     setIsProcessing(true);
 
     try {
@@ -88,71 +88,22 @@ export default function CheckoutPage() {
         throw new Error(data.error || 'Failed to create transaction');
       }
 
-      window.snap.pay(data.token, {
-        onSuccess: async function(result: any){
-          try {
-            await fetch('/api/orders/update-status', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ order_id: result.order_id, transaction_status: result.transaction_status || 'settlement' })
-            });
-            // Save to localStorage
-            const savedOrdersStr = localStorage.getItem('user_orders');
-            let orderIds: string[] = [];
-            if (savedOrdersStr) {
-               try { orderIds = JSON.parse(savedOrdersStr); } catch (e) {}
-            }
-            if (!orderIds.includes(result.order_id)) {
-              orderIds.push(result.order_id);
-              localStorage.setItem('user_orders', JSON.stringify(orderIds));
-            }
-          } catch(e) {}
-          
-          Swal.fire('Berhasil!', 'Pembayaran Anda berhasil.', 'success').then(() => {
-            clearCart();
-            navigate('/my-orders');
-          });
-        },
-        onPending: async function(result: any){
-          try {
-            await fetch('/api/orders/update-status', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ order_id: result.order_id, transaction_status: result.transaction_status || 'pending' })
-            });
+      // Save to localStorage immediately
+      const savedOrdersStr = localStorage.getItem('user_orders');
+      let orderIds: string[] = [];
+      if (savedOrdersStr) {
+         try { orderIds = JSON.parse(savedOrdersStr); } catch (e) {}
+      }
+      if (!orderIds.includes(data.order_id)) {
+        orderIds.push(data.order_id);
+        localStorage.setItem('user_orders', JSON.stringify(orderIds));
+      }
 
-            const savedOrdersStr = localStorage.getItem('user_orders');
-            let orderIds: string[] = [];
-            if (savedOrdersStr) {
-               try { orderIds = JSON.parse(savedOrdersStr); } catch (e) {}
-            }
-            if (!orderIds.includes(result.order_id)) {
-              orderIds.push(result.order_id);
-              localStorage.setItem('user_orders', JSON.stringify(orderIds));
-            }
-          } catch(e) {}
-
-          Swal.fire('Menunggu Pembayaran', 'Silahkan selesaikan pembayaran Anda.', 'info').then(() => {
-            clearCart();
-            navigate('/my-orders');
-          });
-        },
-        onError: async function(result: any){
-          try {
-            await fetch('/api/orders/update-status', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ order_id: result.order_id, transaction_status: result.transaction_status || 'cancel' })
-            });
-          } catch(e) {}
-
-          Swal.fire('Gagal', 'Pembayaran gagal. Silahkan coba lagi.', 'error');
-          setIsProcessing(false);
-        },
-        onClose: function(){
-          setIsProcessing(false);
-        }
+      Swal.fire('Berhasil!', 'Pesanan Anda berhasil dibuat! Silakan bayar pesanan Anda di halaman Riwayat Pesanan.', 'success').then(() => {
+        clearCart();
+        navigate('/my-orders');
       });
+      
     } catch (err: any) {
       console.error(err);
       Swal.fire('Error', err.message, 'error');

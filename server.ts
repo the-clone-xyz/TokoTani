@@ -42,9 +42,18 @@ db.exec(`
     address TEXT,
     total_amount INTEGER,
     status TEXT,
+    payment_status TEXT DEFAULT 'pending',
+    payment_token TEXT,
+    payment_url TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+`);
 
+try { db.exec("ALTER TABLE orders ADD COLUMN payment_status TEXT DEFAULT 'pending'"); } catch(e) {}
+try { db.exec("ALTER TABLE orders ADD COLUMN payment_token TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE orders ADD COLUMN payment_url TEXT"); } catch(e) {}
+
+db.exec(`
   CREATE TABLE IF NOT EXISTS order_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     order_id TEXT,
@@ -234,8 +243,8 @@ async function startServer() {
 
     try {
       // Save order
-      db.prepare("INSERT INTO orders (id, customer_name, customer_email, customer_phone, address, total_amount, status) VALUES (?, ?, ?, ?, ?, ?, ?)")
-        .run(order_id, customer_name, customer_email, customer_phone, address, total_amount, 'pending');
+      db.prepare("INSERT INTO orders (id, customer_name, customer_email, customer_phone, address, total_amount, status, payment_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(order_id, customer_name, customer_email, customer_phone, address, total_amount, 'pending', 'pending');
 
       // Save order items
       if (items && Array.isArray(items)) {
@@ -248,7 +257,8 @@ async function startServer() {
       // Get Midtrans config
       const config = db.prepare("SELECT * FROM midtrans_config LIMIT 1").get() as any;
       if (!config || !config.server_key) {
-        return res.status(400).json({ error: "Midtrans is not configured" });
+        // If not configured, just return the order without a token
+        return res.json({ order_id, message: "Order created successfully without payment token (Gateway not configured)" });
       }
 
       // Create SNAP transaction
@@ -285,6 +295,11 @@ async function startServer() {
       }
 
       const transaction = await snap.createTransaction(parameter);
+      
+      // Update order with payment token
+      db.prepare("UPDATE orders SET payment_token = ?, payment_url = ? WHERE id = ?")
+        .run(transaction.token, transaction.redirect_url, order_id);
+
       res.json({ token: transaction.token, redirect_url: transaction.redirect_url, order_id });
     } catch (e: any) {
       console.error("Checkout error:", e);
@@ -308,15 +323,15 @@ async function startServer() {
   app.post("/api/orders/update-status", (req, res) => {
     const { order_id, transaction_status } = req.body;
     try {
-      let status = 'pending';
+      let paymentStatus = 'pending';
       if (transaction_status === 'capture' || transaction_status === 'settlement') {
-          status = 'success';
+          paymentStatus = 'success';
       } else if (transaction_status === 'cancel' || transaction_status === 'deny' || transaction_status === 'expire') {
-          status = 'failed';
+          paymentStatus = 'failed';
       } else if (transaction_status === 'pending') {
-          status = 'pending';
+          paymentStatus = 'pending';
       }
-      db.prepare("UPDATE orders SET status = ? WHERE id = ?").run(status, order_id);
+      db.prepare("UPDATE orders SET payment_status = ? WHERE id = ?").run(paymentStatus, order_id);
       res.json({ success: true });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -345,22 +360,22 @@ async function startServer() {
 
           console.log(`Transaction notification received. Order ID: ${orderId}. Transaction status: ${transactionStatus}. Fraud status: ${fraudStatus}`);
 
-          let status = 'pending';
+          let paymentStatus = 'pending';
           if (transactionStatus == 'capture') {
               if (fraudStatus == 'challenge') {
-                  status = 'pending';
+                  paymentStatus = 'pending';
               } else if (fraudStatus == 'accept') {
-                  status = 'success';
+                  paymentStatus = 'success';
               }
           } else if (transactionStatus == 'settlement') {
-              status = 'success';
+              paymentStatus = 'success';
           } else if (transactionStatus == 'cancel' || transactionStatus == 'deny' || transactionStatus == 'expire') {
-              status = 'failed';
+              paymentStatus = 'failed';
           } else if (transactionStatus == 'pending') {
-              status = 'pending';
+              paymentStatus = 'pending';
           }
           
-          db.prepare("UPDATE orders SET status = ? WHERE id = ?").run(status, orderId);
+          db.prepare("UPDATE orders SET payment_status = ? WHERE id = ?").run(paymentStatus, orderId);
           res.status(200).json({ status: "ok" });
         });
     } catch (e: any) {
@@ -388,6 +403,15 @@ async function startServer() {
     try {
       const orders = db.prepare("SELECT * FROM orders ORDER BY created_at DESC").all();
       res.json(orders);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.put("/api/admin/orders/:id/status", authenticateToken, (req, res) => {
+    try {
+      db.prepare("UPDATE orders SET status = ? WHERE id = ?").run(req.body.status, req.params.id);
+      res.json({ success: true });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }

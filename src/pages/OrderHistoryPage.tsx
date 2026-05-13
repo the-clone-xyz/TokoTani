@@ -1,11 +1,58 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { Package, Clock, CheckCircle, XCircle } from 'lucide-react';
+import { Package, Clock, CheckCircle, XCircle, CreditCard } from 'lucide-react';
 import { formatIDR } from './HomePage';
+import Swal from 'sweetalert2';
+
+// Extend window for Snap
+declare global {
+  interface Window {
+    snap: any;
+  }
+}
 
 export default function OrderHistoryPage() {
   const [orders, setOrders] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    // Fetch Midtrans config and load script
+    const loadMidtransScript = async () => {
+      try {
+        const res = await fetch('/api/midtrans/client-key');
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.client_key) {
+            const script = document.createElement("script");
+            script.src = data.is_production 
+              ? "https://app.midtrans.com/snap/snap.js"
+              : "https://app.sandbox.midtrans.com/snap/snap.js";
+            script.setAttribute("data-client-key", data.client_key);
+            document.head.appendChild(script);
+          }
+        }
+      } catch (e) {
+        console.error("Failed to load Midtrans script", e);
+      }
+    };
+    loadMidtransScript();
+  }, []);
+
+  const fetchOrdersRaw = async (orderIds: string[]) => {
+    try {
+      const orderPromises = orderIds.map(id => fetch(`/api/orders/${id}`).then(res => res.json()));
+      const fetchedOrders = await Promise.all(orderPromises);
+      // filter out errors
+      const validOrders = fetchedOrders.filter(o => !o.error);
+      // Sort descending by created_at
+      validOrders.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      setOrders(validOrders);
+    } catch (e) {
+      console.error("Failed to fetch orders", e);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   useEffect(() => {
     // Read order IDs from localStorage
@@ -22,23 +69,7 @@ export default function OrderHistoryPage() {
       return;
     }
 
-    const fetchOrders = async () => {
-      try {
-        const orderPromises = orderIds.map(id => fetch(`/api/orders/${id}`).then(res => res.json()));
-        const fetchedOrders = await Promise.all(orderPromises);
-        // filter out errors
-        const validOrders = fetchedOrders.filter(o => !o.error);
-        // Sort descending by created_at
-        validOrders.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-        setOrders(validOrders);
-      } catch (e) {
-        console.error("Failed to fetch orders", e);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    fetchOrders();
+    fetchOrdersRaw(orderIds);
   }, []);
 
   if (isLoading) {
@@ -86,8 +117,13 @@ export default function OrderHistoryPage() {
                   <p className="font-bold text-emerald-600">{formatIDR(order.total_amount)}</p>
                 </div>
                 <div>
-                  {order.status === 'success' && <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-emerald-100 text-emerald-800"><CheckCircle className="w-4 h-4 mr-1"/> Berhasil</span>}
+                  {order.payment_status === 'success' && <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-emerald-100 text-emerald-800 mb-1"><CheckCircle className="w-3 h-3 mr-1"/> Lunas</span>}
+                  <br />
                   {order.status === 'pending' && <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-yellow-100 text-yellow-800"><Clock className="w-4 h-4 mr-1"/> Menunggu</span>}
+                  {(order.status === 'success' || order.status === 'diterima') && <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-emerald-100 text-emerald-800"><CheckCircle className="w-4 h-4 mr-1"/> Diterima</span>}
+                  {order.status === 'diproses' && <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-blue-100 text-blue-800"><Package className="w-4 h-4 mr-1"/> Diproses</span>}
+                  {order.status === 'diantar' && <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-indigo-100 text-indigo-800"><Package className="w-4 h-4 mr-1"/> Diantar</span>}
+                  {order.status === 'selesai' && <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-purple-100 text-purple-800"><CheckCircle className="w-4 h-4 mr-1"/> Selesai</span>}
                   {order.status === 'failed' && <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-red-100 text-red-800"><XCircle className="w-4 h-4 mr-1"/> Gagal</span>}
                 </div>
               </div>
@@ -115,6 +151,67 @@ export default function OrderHistoryPage() {
                     <p>{order.customer_name}</p>
                     <p>{order.customer_phone}</p>
                     <p className="mt-1">{order.address}</p>
+                  </div>
+                  <div className="flex items-end justify-start md:justify-end">
+                    {order.payment_status === 'pending' && order.payment_token && (
+                      <button
+                        onClick={() => {
+                          if (window.snap) {
+                            window.snap.pay(order.payment_token, {
+                              onSuccess: async function(result: any){
+                                try {
+                                  await fetch('/api/orders/update-status', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ order_id: order.id, transaction_status: result.transaction_status || 'settlement' })
+                                  });
+                                } catch(e) {}
+                                Swal.fire('Berhasil', 'Pembayaran berhasil.', 'success').then(() => {
+                                  const savedOrdersStr = localStorage.getItem('user_orders');
+                                  if (savedOrdersStr) { fetchOrdersRaw(JSON.parse(savedOrdersStr)); }
+                                });
+                              },
+                              onPending: async function(result: any){
+                                try {
+                                  await fetch('/api/orders/update-status', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ order_id: order.id, transaction_status: result.transaction_status || 'pending' })
+                                  });
+                                } catch(e) {}
+                                Swal.fire('Pending', 'Pembayaran tertunda.', 'info').then(() => {
+                                  const savedOrdersStr = localStorage.getItem('user_orders');
+                                  if (savedOrdersStr) { fetchOrdersRaw(JSON.parse(savedOrdersStr)); }
+                                });
+                              },
+                              onError: async function(result: any){
+                                try {
+                                  await fetch('/api/orders/update-status', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ order_id: order.id, transaction_status: result.transaction_status || 'cancel' })
+                                  });
+                                } catch(e) {}
+                                Swal.fire('Error', 'Pembayaran gagal.', 'error').then(() => {
+                                  const savedOrdersStr = localStorage.getItem('user_orders');
+                                  if (savedOrdersStr) { fetchOrdersRaw(JSON.parse(savedOrdersStr)); }
+                                });
+                              },
+                              onClose: function(){
+                                const savedOrdersStr = localStorage.getItem('user_orders');
+                                if (savedOrdersStr) { fetchOrdersRaw(JSON.parse(savedOrdersStr)); }
+                              }
+                            });
+                          } else {
+                            Swal.fire('Error', 'Sistem pembayaran sedang disiapkan, silahkan coba lagi nanti.', 'error');
+                          }
+                        }}
+                        className="flex items-center bg-emerald-600 text-white px-4 py-2 rounded-lg font-medium hover:bg-emerald-700 transition"
+                      >
+                        <CreditCard className="w-4 h-4 mr-2" />
+                        Lanjutkan Pembayaran
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>

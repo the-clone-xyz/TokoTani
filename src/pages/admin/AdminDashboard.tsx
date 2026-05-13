@@ -36,7 +36,8 @@ export default function AdminDashboard() {
   
   // Calculate analytics based on successful orders
   const { totalSalesCount, totalRevenue, salesData } = useMemo(() => {
-    const successfulOrders = orders.filter(o => o.status === 'success');
+    const validStatuses = ['success', 'diterima', 'diproses', 'diantar', 'selesai'];
+    const successfulOrders = orders.filter(o => validStatuses.includes(o.status));
     
     // Group exactly by month
     const monthlyData: Record<string, number> = {};
